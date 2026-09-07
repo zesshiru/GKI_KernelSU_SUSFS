@@ -62,6 +62,7 @@ on:
           - KernelSU
           - ReSukiSU
           - All
+          - None
         default: All
       use_susfs:
         description: "SUSFS"
@@ -219,9 +220,10 @@ jobs:
           echo "kernelsu_branch=dev" >> "$GITHUB_OUTPUT"
 
           # Selected root implementation(s). Maps the human-facing choice
-          # (KernelSU-Next / KernelSU / ReSukiSU / All) to internal root-setup
-          # flavors (next / kernelsu / resukisu). Every build always has a root;
-          # 'All' emits a matrix of all three root flavors plus each pinned commit.
+          # (KernelSU-Next / KernelSU / ReSukiSU / All / None) to internal root-setup
+          # flavors (next / kernelsu / resukisu / none). Every build always has a
+          # matrix entry; 'None' emits a single 'no root' entry, 'All' emits a
+          # matrix of all three root flavors plus each pinned commit.
           #
           # kernelsu and resukisu pin in verified mode; KernelSU-Next (next) always
           # builds at latest.
@@ -254,6 +256,14 @@ jobs:
               echo "root_flavor=resukisu" >> "$GITHUB_OUTPUT"
               emit root_commit "$RESUKISU_COMMIT"
               ROOT_MATRIX="[$(mk_entry resukisu ReSukiSU "$RESUKISU_COMMIT")]"
+              ;;
+            None)
+              # No root implementation at all. root_commit is intentionally
+              # empty (no SHA to validate); root-setup.yml/action.yml skip
+              # cloning entirely when flavor == 'none'.
+              echo "root_flavor=none" >> "$GITHUB_OUTPUT"
+              echo "root_commit=" >> "$GITHUB_OUTPUT"
+              ROOT_MATRIX="[$(mk_entry none NoRoot "")]"
               ;;
             All)
               # Fan out to all three root variants, each with its pinned commit.
@@ -386,6 +396,7 @@ jobs:
             KernelSU-Next) LIST=$(jq -c -n '[inputs]' <<< "$(resolve_one next)") ;;
             KernelSU) LIST=$(jq -c -n '[inputs]' <<< "$(resolve_one kernelsu)") ;;
             ReSukiSU) LIST=$(jq -c -n '[inputs]' <<< "$(resolve_one resukisu)") ;;
+            None) LIST="[]" ;;
             *) echo "Skipping manager resolution (no root flavor / none)." ;;
           esac
           if [ -n "$LIST" ]; then
@@ -401,16 +412,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Every build always has a root implementation (no 'none' option), so
-          # SUSFS always has a root to hook into -- no extra guard needed.
+          # Every build always has a matrix entry (root flavor 'none' included),
+          # so this guard exists purely to force SUSFS off when there is no root
+          # implementation to hook into -- SUSFS cannot function without one.
+          USE_SUSFS_EFFECTIVE="${{ inputs.use_susfs }}"
+          if [ "${{ inputs.root_flavor || 'All' }}" = "None" ]; then
+            echo "root_flavor=None -> forcing SUSFS off (SUSFS requires a root implementation)" >&2
+            USE_SUSFS_EFFECTIVE="false"
+          fi
 
           # A Release/Pre-Release ships whichever manger build(s) were resolved
           # in the manager step above (exact match per root flavor). No root
           # restriction applies here anymore -- KernelSU-Next, KernelSU, ReSukiSU,
-          # or 'All' are all valid release targets.
+          # 'All', or 'None' are all valid release targets.
 
           FEATURES=""
-          [ "${{ inputs.use_susfs }}" = "true" ] && FEATURES="${FEATURES}SUSFS+"
+          [ "${USE_SUSFS_EFFECTIVE}" = "true" ] && FEATURES="${FEATURES}SUSFS+"
           [ "${{ inputs.use_nomount }}" = "true" ] && FEATURES="${FEATURES}NoMount+"
           [ "${{ inputs.use_bbg }}" = "true" ] && FEATURES="${FEATURES}BBG+"
           [ "${{ inputs.use_net }}" = "true" ] && FEATURES="${FEATURES}NET+"
@@ -1487,16 +1504,19 @@ jobs:
               _next_url="https://github.com/KernelSU-Next/KernelSU-Next/commit/"
           _root_urls={"next":_next_url,"kernelsu":"https://github.com/tiann/KernelSU/commit/","resukisu":"https://github.com/ReSukiSU/ReSukiSU/commit/"}
           _root_commits={"next":_rmatrix.get("next","") or kernelsu_commit,"kernelsu":_rmatrix.get("kernelsu","") or ksu_commit,"resukisu":_rmatrix.get("resukisu","") or resukisu_commit}
-          _flavors0=[m.get("flavor","") for m in parse_managers(env("MANAGER_LIST","")) if m.get("flavor","")]
-          if not _flavors0:
-              _flavors0={"KernelSU-Next":["next"],"KernelSU":["kernelsu"],"ReSukiSU":["resukisu"],"All":["next","kernelsu","resukisu"]}.get(root,["next","kernelsu","resukisu"])
-          _labels0={"next":"KernelSU-Next","kernelsu":"KernelSU","resukisu":"ReSukiSU"}
-          _rc=[]
-          for _fl0 in _flavors0:
-              _c=_root_commits.get(_fl0,"")
-              if _c and len(_c)==40: _rc.append(f"{_labels0.get(_fl0,_fl0)} [`{_c[:7]}`]({_root_urls[_fl0]}{_c})")
-              elif _c: _rc.append(f"{_labels0.get(_fl0,_fl0)} `{_c}`")
-          for _r in _rc: lines.append(f"- {_r}")
+          if root == "None":
+              lines.append("- No root implementation (root_flavor = None)")
+          else:
+              _flavors0=[m.get("flavor","") for m in parse_managers(env("MANAGER_LIST","")) if m.get("flavor","")]
+              if not _flavors0:
+                  _flavors0={"KernelSU-Next":["next"],"KernelSU":["kernelsu"],"ReSukiSU":["resukisu"],"All":["next","kernelsu","resukisu"]}.get(root,["next","kernelsu","resukisu"])
+              _labels0={"next":"KernelSU-Next","kernelsu":"KernelSU","resukisu":"ReSukiSU"}
+              _rc=[]
+              for _fl0 in _flavors0:
+                  _c=_root_commits.get(_fl0,"")
+                  if _c and len(_c)==40: _rc.append(f"{_labels0.get(_fl0,_fl0)} [`{_c[:7]}`]({_root_urls[_fl0]}{_c})")
+                  elif _c: _rc.append(f"{_labels0.get(_fl0,_fl0)} `{_c}`")
+              for _r in _rc: lines.append(f"- {_r}")
           lines.append("")
           lines.append("## Features")
           lines.append("")
@@ -1514,33 +1534,36 @@ jobs:
           lines.append("")
           lines.append("## SUSFS commits")
           lines.append("")
-          all_variants=["android12-5.10","android13-5.10","android13-5.15","android14-5.15","android14-6.1","android15-6.6","android16-6.12"]
-          def kbv_to_variant(kbv):
-              if ".x-android" in kbv:
-                  kv, av = kbv.split(".x-android", 1)
-                  v = f"android{av}-{kv}"
-                  return v if v in all_variants else ""
-              return ""
-          kbv=env("KERNEL_BUILD_VERSION","All")
-          _sel=kbv_to_variant(kbv)
-          variants=[_sel] if _sel else list(all_variants)
-          sus_map={"android12-5.10":env("SUSFS_ANDROID12_5_10",""),"android13-5.10":env("SUSFS_ANDROID13_5_10",""),"android13-5.15":env("SUSFS_ANDROID13_5_15",""),"android14-5.15":env("SUSFS_ANDROID14_5_15",""),"android14-6.1":env("SUSFS_ANDROID14_6_1",""),"android15-6.6":env("SUSFS_ANDROID15_6_6",""),"android16-6.12":env("SUSFS_ANDROID16_6_12","")}
-          sus_map_resukisu={"android12-5.10":env("SUSFS_ANDROID12_5_10_RESUKISU",""),"android13-5.10":env("SUSFS_ANDROID13_5_10_RESUKISU",""),"android13-5.15":env("SUSFS_ANDROID13_5_15_RESUKISU",""),"android14-5.15":env("SUSFS_ANDROID14_5_15_RESUKISU",""),"android14-6.1":env("SUSFS_ANDROID14_6_1_RESUKISU",""),"android15-6.6":env("SUSFS_ANDROID15_6_6_RESUKISU",""),"android16-6.12":env("SUSFS_ANDROID16_6_12_RESUKISU","")}
-          _flavors=[m.get("flavor","") for m in parse_managers(env("MANAGER_LIST","")) if m.get("flavor","")]
-          if not _flavors:
-              _flavors={"KernelSU-Next":["next"],"KernelSU":["kernelsu"],"ReSukiSU":["resukisu"],"All":["next","kernelsu","resukisu"]}.get(root,["next","kernelsu","resukisu"])
-          _labels={"next":"KernelSU-Next","kernelsu":"KernelSU","resukisu":"ReSukiSU"}
-          _susfs_url="https://gitlab.com/simonpunk/susfs4ksu"
-          lines.append("| SUSFS branch |" + "".join(f" {_labels.get(_fl,_fl)} |" for _fl in _flavors))
-          lines.append("|---" * (len(_flavors) + 1) + "|")
-          for v in variants:
-              _row=f"| gki-{v} |"
-              for _fl in _flavors:
-                  _sm=sus_map_resukisu if _fl=="resukisu" else sus_map
-                  sha=_sm.get(v,"")
-                  sha_s=f"[`{sha[:7]}`]({_susfs_url}/-/commit/{sha})" if sha else "_n/a_"
-                  _row+=f" {sha_s} |"
-              lines.append(_row)
+          if root == "None":
+              lines.append("- N/A (no root implementation selected)")
+          else:
+              all_variants=["android12-5.10","android13-5.10","android13-5.15","android14-5.15","android14-6.1","android15-6.6","android16-6.12"]
+              def kbv_to_variant(kbv):
+                  if ".x-android" in kbv:
+                      kv, av = kbv.split(".x-android", 1)
+                      v = f"android{av}-{kv}"
+                      return v if v in all_variants else ""
+                  return ""
+              kbv=env("KERNEL_BUILD_VERSION","All")
+              _sel=kbv_to_variant(kbv)
+              variants=[_sel] if _sel else list(all_variants)
+              sus_map={"android12-5.10":env("SUSFS_ANDROID12_5_10",""),"android13-5.10":env("SUSFS_ANDROID13_5_10",""),"android13-5.15":env("SUSFS_ANDROID13_5_15",""),"android14-5.15":env("SUSFS_ANDROID14_5_15",""),"android14-6.1":env("SUSFS_ANDROID14_6_1",""),"android15-6.6":env("SUSFS_ANDROID15_6_6",""),"android16-6.12":env("SUSFS_ANDROID16_6_12","")}
+              sus_map_resukisu={"android12-5.10":env("SUSFS_ANDROID12_5_10_RESUKISU",""),"android13-5.10":env("SUSFS_ANDROID13_5_10_RESUKISU",""),"android13-5.15":env("SUSFS_ANDROID13_5_15_RESUKISU",""),"android14-5.15":env("SUSFS_ANDROID14_5_15_RESUKISU",""),"android14-6.1":env("SUSFS_ANDROID14_6_1_RESUKISU",""),"android15-6.6":env("SUSFS_ANDROID15_6_6_RESUKISU",""),"android16-6.12":env("SUSFS_ANDROID16_6_12_RESUKISU","")}
+              _flavors=[m.get("flavor","") for m in parse_managers(env("MANAGER_LIST","")) if m.get("flavor","")]
+              if not _flavors:
+                  _flavors={"KernelSU-Next":["next"],"KernelSU":["kernelsu"],"ReSukiSU":["resukisu"],"All":["next","kernelsu","resukisu"]}.get(root,["next","kernelsu","resukisu"])
+              _labels={"next":"KernelSU-Next","kernelsu":"KernelSU","resukisu":"ReSukiSU"}
+              _susfs_url="https://gitlab.com/simonpunk/susfs4ksu"
+              lines.append("| SUSFS branch |" + "".join(f" {_labels.get(_fl,_fl)} |" for _fl in _flavors))
+              lines.append("|---" * (len(_flavors) + 1) + "|")
+              for v in variants:
+                  _row=f"| gki-{v} |"
+                  for _fl in _flavors:
+                      _sm=sus_map_resukisu if _fl=="resukisu" else sus_map
+                      sha=_sm.get(v,"")
+                      sha_s=f"[`{sha[:7]}`]({_susfs_url}/-/commit/{sha})" if sha else "_n/a_"
+                      _row+=f" {sha_s} |"
+                  lines.append(_row)
           lines.append("")
           lines.append("")
           output="\n".join(lines)+"\n"
@@ -1555,4 +1578,3 @@ jobs:
           path: release_body.md
           retention-days: 7
           if-no-files-found: warn
-
